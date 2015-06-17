@@ -32,8 +32,7 @@
     <tr>
       <th>Resource</th>
       <th>Status</th>
-      <th>Changed From</th>
-      <th>Changed To</th>
+      <th>Message</th>
     </tr>
   </thead>
   <tbody>
@@ -45,10 +44,11 @@
     {% endif %}
       <td>{{event.item['type']}}[{{event.item['title']}}]</td>
       <td>{{event.status}}</td>
-      <td>{{event.item['old']}}</td>
-      <td>{{event.item['new']}}</td>
+      {#<td>{{event.item['old']}}</td>
+      <td>{{event.item['new']}}</td>#}
+	  <td>{{event.item['message']}}</td>
     </tr>
-    {#    <tr>
+{#        <tr>
       <td class='message' colspan='4'>
         <div id='message-event-{{loop.index}}'>
           {{event.item['message']}}
