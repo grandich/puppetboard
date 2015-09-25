@@ -26,6 +26,8 @@
             black
           {% elif node.status == 'noop' %}
             blue
+          {% elif node.status == 'none' %}
+            yellow
           {% endif %}
           " href="{{url_for('report_latest', node_name=node.name)}}">
             {{node.status}}

@@ -128,7 +128,8 @@ def index():
         'unchanged': 0,
         'failed': 0,
         'unreported': 0,
-        'noop': 0
+        'noop': 0,
+        'none': 0,
         }
 
     for node in nodes:
@@ -140,10 +141,12 @@ def index():
             stats['failed'] += 1
         elif node.status == 'noop':
             stats['noop'] += 1
+        elif node.status is None:
+            stats['none'] += 1
         else:
             stats['unchanged'] += 1
 
-        if node.status != 'unchanged':
+        if node.status != 'unchanged' and node.status is not None:
             nodes_overview.append(node)
 
     return render_template(
@@ -172,7 +175,7 @@ def nodes():
     nodes = []
     for node in yield_or_stop(nodelist):
         if status_arg:
-            if node.status == status_arg:
+            if node.status == status_arg or node.status is None and status_arg == 'none':
                 nodes.append(node)
         else:
             nodes.append(node)
