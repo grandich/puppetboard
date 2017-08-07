@@ -11,10 +11,10 @@
 {% endif %}
 {% endwith %}
 <div class="ui form">
-  <form method="POST" action="{{ url_for('query') }}">
+  <form method="POST" action="{{ url_for('query', env=current_env) }}">
     {{ form.csrf_token }}
     <div class="field {% if form.query.errors %} error {% endif %}">
-      {{ form.query(autofocus="autofocus", rows=5, placeholder="Enter your query: [\"=\", \"name\", \"hostname\"]. You may omit the opening and closing bracket.") }}
+      {{ form.query(autofocus="autofocus", rows=5, placeholder="Enter your query: [\"=\", \"certname\", \"hostname\"]. You may omit the opening and closing bracket.") }}
     </div>
     <div class="inline fields">
       {% for subfield in form.endpoints %}
@@ -26,6 +26,11 @@
       </div>
       {% endfor %}
     </div>
+    <div class="inline fields">
+      <div class="field">
+        {{ form.rawjson(active=True) }} Raw JSON
+      </div>
+    </div>
     <input type=submit class="ui submit button" value='Submit'>
     <input type=reset class="ui red submit button" value='Cancel'>
   </form>
@@ -35,7 +40,13 @@
 <div class="row">
   <div class="span12">
     <h2>Result</h2>
+      {% if form.rawjson.data %}
       <pre><code>{{ result|jsonprint }}</code></pre>
+      {% else %}
+      {% autoescape false %}
+      {{ result|prettyprint}}
+      {% endautoescape %}
+      {% endif %}
   </div>
 </div>
 {% endif %}

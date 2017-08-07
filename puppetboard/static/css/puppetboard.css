@@ -1,6 +1,7 @@
 body {
   margin: 0;
   font-family: "Open Sans", sans-serif;
+  font-size: 1.2rem;
 }
 
 a {
@@ -12,38 +13,85 @@ h1.ui.header.no-margin-bottom {
   margin-bottom: 0;
 }
 
-.tablesorter-header-inner {
-  float: left;
-}
-
-th.tablesorter-headerAsc::after {
-  content: '\25b4' !important;
-  float: right;
-}
-
-th.tablesorter-headerDesc::after {
-  content: '\25be' !important;
-  float: right;
-}
-
 .ui.grid.padding-bottom {
-  padding-bottom: 40px !important;
+  padding-bottom: 4em !important;
 }
 
 .status {
-  width: 47.5%;
+  width: 13.2em;
   text-align: center;
   display: block;
+}
+
+.ui.table[class*="very compact"] td {
+  padding: 0.15em 0.1em;
+}
+
+.factlist li {
+  word-wrap: break-word;
+}
+
+.ui.table.wrapped td {
+  word-wrap: break-word;
+}
+
+.ui.label.status {
+  color: white;
+  text-shadow: 0 0 1px;
+}
+
+.ui.header.failed, .ui.line.failed {
+  color: #AA4643;
+}
+
+.ui.label.failed, .ui.label.events.failure {
+  background-color: #AA4643;
+}
+
+.ui.header.changed, .ui.line.changed {
+  color: #4572A7;
+}
+
+.ui.label.changed, .ui.label.events.success {
+  background-color: #4572A7;
+}
+
+.ui.header.unreported {
+  color: #3D96AE;
+}
+
+.ui.label.unreported {
+  background-color: #3D96AE;
+}
+
+.ui.header.noop {
+  color: #DB843D;
+}
+
+.ui.label.noop, .ui.label.events.noop {
+  background-color: #DB843D;
+}
+
+.ui.label.resources.total {
+  background-color: #989898;
+}
+
+.ui.label.unchanged {
+  background-color: #89A54E;
+}
+
+.ui.line.skipped {
+  color: orange;
+}
+
+.ui.label.skipped, .ui.label.resources.skipped {
+  background-color: orange;
 }
 
 .count {
-  width: 14%;
+  width: 4em;
   text-align: center;
   display: block;
-}
-
-.no-margin-top {
-  margin-top: -35px !important;
 }
 
 .absolute {
@@ -73,6 +121,23 @@ th.tablesorter-headerDesc::after {
   background-color: #2C3E50;
   border-color: #2C3E50;
   color: #FFF;
+}
+
+.ui.menu.yellow {
+  background-color: #F0E965;
+}
+
+.ui.yellow.header, i.yellow {
+  color: #F0E965;
+}
+
+.ui.labels .yellow.label::before, .ui.yellow.labels .label::before, .ui.yellow.label::before {
+  background-color: #F0E965;
+}
+
+.ui.yellow.labels .label, .ui.yellow.label {
+  background-color: #F0E965;
+  border-color: #F0E965;
 }
 
 #scroll-btn-top {
@@ -118,4 +183,8 @@ th.tablesorter-headerDesc::after {
   margin: 0;
   margin-right: -50%;
   transform: translate(-50%, -50%)
+}
+
+#dailyReportsChartContainer {
+  height: 160px;
 }

@@ -4,52 +4,65 @@ from __future__ import absolute_import
 import logging
 import collections
 try:
-    from urllib import unquote
+    from urllib import unquote, unquote_plus, quote_plus
 except ImportError:
-    from urllib.parse import unquote
-from datetime import datetime
+    from urllib.parse import unquote, unquote_plus, quote_plus
+from datetime import datetime, timedelta
+from itertools import tee
 
 from flask import (
     Flask, render_template, abort, url_for,
     Response, stream_with_context, redirect,
-    request
-    )
-from flask_wtf.csrf import CsrfProtect
+    request, session, jsonify
+)
+from jinja2.utils import contextfunction
 
-from pypuppetdb import connect
+from pypuppetdb.QueryBuilder import *
 
 from puppetboard.forms import QueryForm
-from puppetboard.utils import (
-    get_or_abort, yield_or_stop,
-    limit_reports, jsonprint
-    )
+from puppetboard.utils import (get_or_abort, yield_or_stop,
+                               get_db_version)
+from puppetboard.dailychart import get_daily_reports_chart
+
+import werkzeug.exceptions as ex
+import CommonMark
+
+from puppetboard.core import get_app, get_puppetdb, environments
+import puppetboard.errors
+
+from . import __version__
 
 
-app = Flask(__name__)
-CsrfProtect(app)
+REPORTS_COLUMNS = [
+    {'attr': 'end', 'filter': 'end_time',
+     'name': 'End time', 'type': 'datetime'},
+    {'attr': 'status', 'name': 'Status', 'type': 'status'},
+    {'attr': 'certname', 'name': 'Certname', 'type': 'node'},
+    {'attr': 'version', 'filter': 'configuration_version',
+     'name': 'Configuration version'},
+    {'attr': 'agent_version', 'filter': 'puppet_version',
+     'name': 'Agent version'},
+]
 
-app.config.from_object('puppetboard.default_settings')
+CATALOGS_COLUMNS = [
+    {'attr': 'certname', 'name': 'Certname', 'type': 'node'},
+    {'attr': 'catalog_timestamp', 'name': 'Compile Time'},
+    {'attr': 'form', 'name': 'Compare'},
+]
+
+app = get_app()
 graph_facts = app.config['GRAPH_FACTS']
-app.config.from_envvar('PUPPETBOARD_SETTINGS', silent=True)
-graph_facts += app.config['GRAPH_FACTS']
-app.secret_key = app.config['SECRET_KEY']
-
-app.jinja_env.filters['jsonprint'] = jsonprint
-
-puppetdb = connect(
-    api_version=3,
-    host=app.config['PUPPETDB_HOST'],
-    port=app.config['PUPPETDB_PORT'],
-    ssl_verify=app.config['PUPPETDB_SSL_VERIFY'],
-    ssl_key=app.config['PUPPETDB_KEY'],
-    ssl_cert=app.config['PUPPETDB_CERT'],
-    timeout=app.config['PUPPETDB_TIMEOUT'],)
-
 numeric_level = getattr(logging, app.config['LOGLEVEL'].upper(), None)
-if not isinstance(numeric_level, int):
-    raise ValueError('Invalid log level: %s' % app.config['LOGLEVEL'])
+
 logging.basicConfig(level=numeric_level)
 log = logging.getLogger(__name__)
+
+puppetdb = get_puppetdb()
+
+
+@app.template_global()
+def version():
+    return __version__
 
 
 def stream_template(template_name, **context):
@@ -60,67 +73,96 @@ def stream_template(template_name, **context):
     return rv
 
 
+def check_env(env, envs):
+    if env != '*' and env not in envs:
+        abort(404)
+
+
 @app.context_processor
 def utility_processor():
     def now(format='%m/%d/%Y %H:%M:%S'):
         """returns the formated datetime"""
-        return datetime.now().strftime(format)
+        return datetime.datetime.now().strftime(format)
     return dict(now=now)
 
 
-@app.errorhandler(400)
-def bad_request(e):
-    return render_template('400.html'), 400
-
-
-@app.errorhandler(403)
-def forbidden(e):
-    return render_template('403.html'), 400
-
-
-@app.errorhandler(404)
-def not_found(e):
-    return render_template('404.html'), 404
-
-
-@app.errorhandler(412)
-def precond_failed(e):
-    """We're slightly abusing 412 to handle missing features
-    depending on the API version."""
-    return render_template('412.html'), 412
-
-
-@app.errorhandler(500)
-def server_error(e):
-    return render_template('500.html'), 500
-
-
-@app.route('/')
-def index():
+@app.route('/', defaults={'env': app.config['DEFAULT_ENVIRONMENT']})
+@app.route('/<env>/')
+def index(env):
     """This view generates the index page and displays a set of metrics and
     latest reports on nodes fetched from PuppetDB.
-    """
-    # TODO: Would be great if we could parallelize this somehow, doing these
-    # requests in sequence is rather pointless.
-    prefix = 'com.puppetlabs.puppetdb.query.population'
-    num_nodes = get_or_abort(
-        puppetdb.metric,
-        "{0}{1}".format(prefix, ':type=default,name=num-nodes'))
-    num_resources = get_or_abort(
-        puppetdb.metric,
-        "{0}{1}".format(prefix, ':type=default,name=num-resources'))
-    avg_resources_node = get_or_abort(
-        puppetdb.metric,
-        "{0}{1}".format(prefix, ':type=default,name=avg-resources-per-node'))
-    metrics = {
-        'num_nodes': num_nodes['Value'],
-        'num_resources': num_resources['Value'],
-        'avg_resources_node': "{0:10.0f}".format(avg_resources_node['Value']),
-        }
 
-    nodes = puppetdb.nodes(
-        unreported=app.config['UNRESPONSIVE_HOURS'],
-        with_status=True)
+    :param env: Search for nodes in this (Catalog and Fact) environment
+    :type env: :obj:`string`
+    """
+    envs = environments()
+    metrics = {
+        'num_nodes': 0,
+        'num_resources': 0,
+        'avg_resources_node': 0}
+    check_env(env, envs)
+
+    if env == '*':
+        query = app.config['OVERVIEW_FILTER']
+
+        prefix = 'puppetlabs.puppetdb.population'
+        query_type = ''
+
+        # Puppet DB version changed the query format from 3.2.0
+        # to 4.0 when querying mbeans
+        if get_db_version(puppetdb) < (4, 0, 0):
+            query_type = 'type=default,'
+
+        num_nodes = get_or_abort(
+            puppetdb.metric,
+            "{0}{1}".format(prefix, ':%sname=num-nodes' % query_type))
+        num_resources = get_or_abort(
+            puppetdb.metric,
+            "{0}{1}".format(prefix, ':%sname=num-resources' % query_type))
+        avg_resources_node = get_or_abort(
+            puppetdb.metric,
+            "{0}{1}".format(prefix,
+                            ':%sname=avg-resources-per-node' % query_type))
+        metrics['num_nodes'] = num_nodes['Value']
+        metrics['num_resources'] = num_resources['Value']
+        metrics['avg_resources_node'] = "{0:10.0f}".format(
+            avg_resources_node['Value'])
+    else:
+        query = AndOperator()
+        query.add(EqualsOperator('catalog_environment', env))
+        query.add(EqualsOperator('facts_environment', env))
+
+        num_nodes_query = ExtractOperator()
+        num_nodes_query.add_field(FunctionOperator('count'))
+        num_nodes_query.add_query(query)
+
+        if app.config['OVERVIEW_FILTER'] is not None:
+            query.add(app.config['OVERVIEW_FILTER'])
+
+        num_resources_query = ExtractOperator()
+        num_resources_query.add_field(FunctionOperator('count'))
+        num_resources_query.add_query(EqualsOperator("environment", env))
+
+        num_nodes = get_or_abort(
+            puppetdb._query,
+            'nodes',
+            query=num_nodes_query)
+        num_resources = get_or_abort(
+            puppetdb._query,
+            'resources',
+            query=num_resources_query)
+        metrics['num_nodes'] = num_nodes[0]['count']
+        metrics['num_resources'] = num_resources[0]['count']
+        try:
+            metrics['avg_resources_node'] = "{0:10.0f}".format(
+                (num_resources[0]['count'] / num_nodes[0]['count']))
+        except ZeroDivisionError:
+            metrics['avg_resources_node'] = 0
+
+    nodes = get_or_abort(puppetdb.nodes,
+                         query=query,
+                         unreported=app.config['UNRESPONSIVE_HOURS'],
+                         with_status=True)
 
     nodes_overview = []
     stats = {
@@ -128,9 +170,8 @@ def index():
         'unchanged': 0,
         'failed': 0,
         'unreported': 0,
-        'noop': 0,
-        'none': 0,
-        }
+        'noop': 0
+    }
 
     for node in nodes:
         if node.status == 'unreported':
@@ -141,24 +182,25 @@ def index():
             stats['failed'] += 1
         elif node.status == 'noop':
             stats['noop'] += 1
-        elif node.status is None:
-            stats['none'] += 1
         else:
             stats['unchanged'] += 1
 
-        if node.status != 'unchanged' and node.status is not None:
+        if node.status != 'unchanged':
             nodes_overview.append(node)
 
     return render_template(
         'index.html',
         metrics=metrics,
         nodes=nodes_overview,
-        stats=stats
-        )
+        stats=stats,
+        envs=envs,
+        current_env=env
+    )
 
 
-@app.route('/nodes')
-def nodes():
+@app.route('/nodes', defaults={'env': app.config['DEFAULT_ENVIRONMENT']})
+@app.route('/<env>/nodes')
+def nodes(env):
     """Fetch all (active) nodes from PuppetDB and stream a table displaying
     those nodes.
 
@@ -167,215 +209,566 @@ def nodes():
     we'll end up with an empty table instead because of how yield_or_stop
     works. Once pagination is in place we can change this but we'll need to
     provide a search feature instead.
+
+    :param env: Search for nodes in this (Catalog and Fact) environment
+    :type env: :obj:`string`
     """
+    envs = environments()
     status_arg = request.args.get('status', '')
+    check_env(env, envs)
+
+    query = AndOperator()
+
+    if env != '*':
+        query.add(EqualsOperator("catalog_environment", env))
+        query.add(EqualsOperator("facts_environment", env))
+
+    if status_arg in ['failed', 'changed', 'unchanged']:
+        query.add(EqualsOperator('latest_report_status', status_arg))
+    elif status_arg == 'unreported':
+        unreported = datetime.datetime.utcnow()
+        unreported = (unreported -
+                      timedelta(hours=app.config['UNRESPONSIVE_HOURS']))
+        unreported = unreported.replace(microsecond=0).isoformat()
+
+        unrep_query = OrOperator()
+        unrep_query.add(NullOperator('report_timestamp', True))
+        unrep_query.add(LessEqualOperator('report_timestamp', unreported))
+
+        query.add(unrep_query)
+
+    if len(query.operations) == 0:
+        query = None
+
     nodelist = puppetdb.nodes(
+        query=query,
         unreported=app.config['UNRESPONSIVE_HOURS'],
         with_status=True)
     nodes = []
     for node in yield_or_stop(nodelist):
         if status_arg:
-            if node.status == status_arg or node.status is None and status_arg == 'none':
+            if node.status == status_arg:
                 nodes.append(node)
         else:
             nodes.append(node)
     return Response(stream_with_context(
-        stream_template('nodes.html', nodes=nodes)))
+        stream_template('nodes.html',
+                        nodes=nodes,
+                        envs=envs,
+                        current_env=env)))
 
 
-@app.route('/inventory')
-def inventory():
-    """Fetch all (active) nodes from PuppetDB and stream a table displaying
-    those nodes along with a set of facts about them.
-
-    Downside of the streaming aproach is that since we've already sent our
-    headers we can't abort the request if we detect an error. Because of this
-    we'll end up with an empty table instead because of how yield_or_stop
-    works. Once pagination is in place we can change this but we'll need to
-    provide a search feature instead.
-    """
-
-    fact_desc  = []     # a list of fact descriptions to go
-                        # in the table header
-    fact_names = []     # a list of inventory fact names
-    factvalues = {}     # values of the facts for all the nodes
-                        # indexed by node name and fact name
-    nodedata   = {}     # a dictionary containing list of inventoried
-                        # facts indexed by node name
-    nodelist   = set()  # a set of node names
-
-    # get all the facts from PuppetDB
-    facts = puppetdb.facts()
+def inventory_facts():
+    # a list of facts descriptions to go in table header
+    headers = []
+    # a list of inventory fact names
+    fact_names = []
 
     # load the list of items/facts we want in our inventory
     try:
         inv_facts = app.config['INVENTORY_FACTS']
     except KeyError:
-        inv_facts = [ ('Hostname'      ,'fqdn'              ),
-                      ('IP Address'    ,'ipaddress'         ),
-                      ('OS'            ,'lsbdistdescription'),
-                      ('Architecture'  ,'hardwaremodel'     ),
-                      ('Kernel Version','kernelrelease'     ) ]
+        inv_facts = [('Hostname', 'fqdn'),
+                     ('IP Address', 'ipaddress'),
+                     ('OS', 'lsbdistdescription'),
+                     ('Architecture', 'hardwaremodel'),
+                     ('Kernel Version', 'kernelrelease')]
 
     # generate a list of descriptions and a list of fact names
     # from the list of tuples inv_facts.
-    for description,name in inv_facts:
-        fact_desc.append(description)
+    for desc, name in inv_facts:
+        headers.append(desc)
         fact_names.append(name)
 
-    # convert the json in easy to access data structure
+    return headers, fact_names
+
+
+@app.route('/inventory', defaults={'env': app.config['DEFAULT_ENVIRONMENT']})
+@app.route('/<env>/inventory')
+def inventory(env):
+    """Fetch all (active) nodes from PuppetDB and stream a table displaying
+    those nodes along with a set of facts about them.
+
+    :param env: Search for facts in this environment
+    :type env: :obj:`string`
+    """
+    envs = environments()
+    check_env(env, envs)
+    headers, fact_names = inventory_facts()
+
+    return render_template(
+        'inventory.html',
+        envs=envs,
+        current_env=env,
+        fact_headers=headers)
+
+
+@app.route('/inventory/json',
+           defaults={'env': app.config['DEFAULT_ENVIRONMENT']})
+@app.route('/<env>/inventory/json')
+def inventory_ajax(env):
+    """Backend endpoint for inventory table"""
+    draw = int(request.args.get('draw', 0))
+
+    envs = environments()
+    check_env(env, envs)
+    headers, fact_names = inventory_facts()
+
+    query = AndOperator()
+    fact_query = OrOperator()
+    fact_query.add([EqualsOperator("name", name) for name in fact_names])
+    query.add(fact_query)
+
+    if env != '*':
+        query.add(EqualsOperator("environment", env))
+
+    facts = puppetdb.facts(query=query)
+
+    fact_data = {}
     for fact in facts:
-        factvalues[fact.node,fact.name] = fact.value
-        nodelist.add(fact.node)
+        if fact.node not in fact_data:
+            fact_data[fact.node] = {}
+        fact_data[fact.node][fact.name] = fact.value
 
-    # generate the per-host data
-    for node in nodelist:
-        nodedata[node] = []
-        for fact_name in fact_names:
-            try:
-                nodedata[node].append(factvalues[node,fact_name])
-            except KeyError:
-                nodedata[node].append("undef")
+    total = len(fact_data)
 
-    return Response(stream_with_context(
-        stream_template('inventory.html', nodedata=nodedata, fact_desc=fact_desc)))
+    return render_template(
+        'inventory.json.tpl',
+        draw=draw,
+        total=total,
+        total_filtered=total,
+        fact_data=fact_data,
+        columns=fact_names)
 
 
-@app.route('/node/<node_name>')
-def node(node_name):
+@app.route('/node/<node_name>',
+           defaults={'env': app.config['DEFAULT_ENVIRONMENT']})
+@app.route('/<env>/node/<node_name>')
+def node(env, node_name):
     """Display a dashboard for a node showing as much data as we have on that
     node. This includes facts and reports but not Resources as that is too
     heavy to do within a single request.
+
+    :param env: Ensure that the node, facts and reports are in this environment
+    :type env: :obj:`string`
     """
+    envs = environments()
+    check_env(env, envs)
+    query = AndOperator()
+
+    if env != '*':
+        query.add(EqualsOperator("environment", env))
+
+    query.add(EqualsOperator("certname", node_name))
+
     node = get_or_abort(puppetdb.node, node_name)
-    facts = node.facts()
-    reports = limit_reports(node.reports(), app.config['REPORTS_COUNT'])
+
     return render_template(
         'node.html',
         node=node,
-        facts=yield_or_stop(facts),
-        reports=yield_or_stop(reports),
-        reports_count=app.config['REPORTS_COUNT'])
+        envs=envs,
+        current_env=env,
+        columns=REPORTS_COLUMNS[:2])
 
 
-@app.route('/reports')
-def reports():
-    """Doesn't do much yet but is meant to show something like the reports of
-    the last half our, something like that."""
-    return render_template('reports.html')
+@app.route('/reports',
+           defaults={'env': app.config['DEFAULT_ENVIRONMENT'],
+                     'node_name': None})
+@app.route('/<env>/reports', defaults={'node_name': None})
+@app.route('/reports/<node_name>',
+           defaults={'env': app.config['DEFAULT_ENVIRONMENT']})
+@app.route('/<env>/reports/<node_name>')
+def reports(env, node_name):
+    """Query and Return JSON data to reports Jquery datatable
 
-
-@app.route('/reports/<node_name>')
-def reports_node(node_name):
-    """Fetches all reports for a node and processes them eventually rendering
-    a table displaying those reports."""
-    reports = limit_reports(
-        yield_or_stop(
-            puppetdb.reports('["=", "certname", "{0}"]'.format(node_name))),
-        app.config['REPORTS_COUNT'])
-    return render_template(
-        'reports_node.html',
-        reports=reports,
-        nodename=node_name,
-        reports_count=app.config['REPORTS_COUNT'])
-
-
-@app.route('/report/latest/<node_name>')
-def report_latest(node_name):
-    """Redirect to the latest report of a given node. This is a workaround
-    as long as PuppetDB can't filter reports for latest-report? field. This
-    feature has been requested: https://tickets.puppetlabs.com/browse/PDB-203
+    :param env: Search for all reports in this environment
+    :type env: :obj:`string`
     """
-    reports = get_or_abort(puppetdb._query, 'reports',
-                           query='["=","certname","{0}"]'.format(node_name),
-                           limit=1)
-    if len(reports) > 0:
-        report = reports[0]['hash']
-        return redirect(
-            url_for('report', node_name=node_name, report_id=report))
+    envs = environments()
+    check_env(env, envs)
+    return render_template(
+        'reports.html',
+        envs=envs,
+        current_env=env,
+        node_name=node_name,
+        columns=REPORTS_COLUMNS)
+
+
+@app.route('/reports/json',
+           defaults={'env': app.config['DEFAULT_ENVIRONMENT'],
+                     'node_name': None})
+@app.route('/<env>/reports/json', defaults={'node_name': None})
+@app.route('/reports/<node_name>/json',
+           defaults={'env': app.config['DEFAULT_ENVIRONMENT']})
+@app.route('/<env>/reports/<node_name>/json')
+def reports_ajax(env, node_name):
+    """Query and Return JSON data to reports Jquery datatable
+
+    :param env: Search for all reports in this environment
+    :type env: :obj:`string`
+    """
+    draw = int(request.args.get('draw', 0))
+    start = int(request.args.get('start', 0))
+    length = int(request.args.get('length', app.config['NORMAL_TABLE_COUNT']))
+    paging_args = {'limit': length, 'offset': start}
+    search_arg = request.args.get('search[value]')
+    order_column = int(request.args.get('order[0][column]', 0))
+    order_filter = REPORTS_COLUMNS[order_column].get(
+        'filter', REPORTS_COLUMNS[order_column]['attr'])
+    order_dir = request.args.get('order[0][dir]', 'desc')
+    order_args = '[{"field": "%s", "order": "%s"}]' % (order_filter, order_dir)
+    status_args = request.args.get('columns[1][search][value]', '').split('|')
+    max_col = len(REPORTS_COLUMNS)
+    for i in range(len(REPORTS_COLUMNS)):
+        if request.args.get("columns[%s][data]" % i, None):
+            max_col = i + 1
+
+    envs = environments()
+    check_env(env, envs)
+    reports_query = AndOperator()
+
+    if env != '*':
+        reports_query.add(EqualsOperator("environment", env))
+
+    if node_name:
+        reports_query.add(EqualsOperator("certname", node_name))
+
+    if search_arg:
+        search_query = OrOperator()
+        search_query.add(RegexOperator("certname", r"%s" % search_arg))
+        search_query.add(RegexOperator("puppet_version", r"%s" % search_arg))
+        search_query.add(RegexOperator(
+            "configuration_version", r"%s" % search_arg))
+        reports_query.add(search_query)
+
+    status_query = OrOperator()
+    for status_arg in status_args:
+        if status_arg in ['failed', 'changed', 'unchanged']:
+            arg_query = AndOperator()
+            arg_query.add(EqualsOperator('status', status_arg))
+            arg_query.add(EqualsOperator('noop', False))
+            status_query.add(arg_query)
+            if status_arg == 'unchanged':
+                arg_query = AndOperator()
+                arg_query.add(EqualsOperator('noop', True))
+                arg_query.add(EqualsOperator('noop_pending', False))
+                status_query.add(arg_query)
+        elif status_arg == 'noop':
+            arg_query = AndOperator()
+            arg_query.add(EqualsOperator('noop', True))
+            arg_query.add(EqualsOperator('noop_pending', True))
+            status_query.add(arg_query)
+
+    if len(status_query.operations) == 0:
+        if len(reports_query.operations) == 0:
+            reports_query = None
     else:
-        abort(404)
+        reports_query.add(status_query)
+
+    if status_args[0] != 'none':
+        reports = get_or_abort(
+            puppetdb.reports,
+            query=reports_query,
+            order_by=order_args,
+            include_total=True,
+            **paging_args)
+        reports, reports_events = tee(reports)
+        total = None
+    else:
+        reports = []
+        reports_events = []
+        total = 0
+
+    # Convert metrics to relational dict
+    metrics = {}
+    for report in reports_events:
+        if total is None:
+            total = puppetdb.total
+
+        metrics[report.hash_] = {}
+        for m in report.metrics:
+            if m['category'] not in metrics[report.hash_]:
+                metrics[report.hash_][m['category']] = {}
+            metrics[report.hash_][m['category']][m['name']] = m['value']
+
+    if total is None:
+        total = 0
+
+    return render_template(
+        'reports.json.tpl',
+        draw=draw,
+        total=total,
+        total_filtered=total,
+        reports=reports,
+        metrics=metrics,
+        envs=envs,
+        current_env=env,
+        columns=REPORTS_COLUMNS[:max_col])
 
 
-@app.route('/report/<node_name>/<report_id>')
-def report(node_name, report_id):
+@app.route('/report/<node_name>/<report_id>',
+           defaults={'env': app.config['DEFAULT_ENVIRONMENT']})
+@app.route('/<env>/report/<node_name>/<report_id>')
+def report(env, node_name, report_id):
     """Displays a single report including all the events associated with that
     report and their status.
 
     The report_id may be the puppetdb's report hash or the
     configuration_version. This allows for better integration
     into puppet-hipchat.
-    """
-    reports = puppetdb.reports('["=", "certname", "{0}"]'.format(node_name))
 
-    for report in reports:
-        if report.hash_ == report_id or report.version == report_id:
-            events = puppetdb.events('["=", "report", "{0}"]'.format(
-                report.hash_))
-            return render_template(
-                'report.html',
-                report=report,
-                events=yield_or_stop(events))
-    else:
+    :param env: Search for reports in this environment
+    :type env: :obj:`string`
+    :param node_name: Find the reports whose certname match this value
+    :type node_name: :obj:`string`
+    :param report_id: The hash or the configuration_version of the desired
+        report
+    :type report_id: :obj:`string`
+    """
+    envs = environments()
+    check_env(env, envs)
+    query = AndOperator()
+    report_id_query = OrOperator()
+
+    report_id_query.add(EqualsOperator("hash", report_id))
+    report_id_query.add(EqualsOperator("configuration_version", report_id))
+
+    if env != '*':
+        query.add(EqualsOperator("environment", env))
+
+    query.add(EqualsOperator("certname", node_name))
+    query.add(report_id_query)
+
+    reports = puppetdb.reports(query=query)
+
+    try:
+        report = next(reports)
+    except StopIteration:
         abort(404)
 
+    report.version = CommonMark.commonmark(report.version)
 
-@app.route('/facts')
-def facts():
+    return render_template(
+        'report.html',
+        report=report,
+        events=yield_or_stop(report.events()),
+        logs=report.logs,
+        metrics=report.metrics,
+        envs=envs,
+        current_env=env)
+
+
+@app.route('/facts', defaults={'env': app.config['DEFAULT_ENVIRONMENT']})
+@app.route('/<env>/facts')
+def facts(env):
     """Displays an alphabetical list of all facts currently known to
-    PuppetDB."""
-    facts_dict = collections.defaultdict(list)
+    PuppetDB.
+
+    :param env: Serves no purpose for this function, only for consistency's
+        sake
+    :type env: :obj:`string`
+    """
+    envs = environments()
+    check_env(env, envs)
+    facts = []
+    order_by = '[{"field": "name", "order": "asc"}]'
     facts = get_or_abort(puppetdb.fact_names)
+
+    facts_columns = [[]]
+    letter = None
+    letter_list = None
+    break_size = (len(facts) / 4) + 1
+    next_break = break_size
+    count = 0
     for fact in facts:
-        letter = fact[0].upper()
-        letter_list = facts_dict[letter]
+        count += 1
+
+        if letter != fact[0].upper() or not letter:
+            if count > next_break:
+                # Create a new column
+                facts_columns.append([])
+                next_break += break_size
+            if letter_list:
+                facts_columns[-1].append(letter_list)
+            # Reset
+            letter = fact[0].upper()
+            letter_list = []
+
         letter_list.append(fact)
-        facts_dict[letter] = letter_list
+    facts_columns[-1].append(letter_list)
 
-    sorted_facts_dict = sorted(facts_dict.items())
-    return render_template('facts.html', facts_dict=sorted_facts_dict)
+    return render_template('facts.html',
+                           facts_columns=facts_columns,
+                           envs=envs,
+                           current_env=env)
 
 
-@app.route('/fact/<fact>')
-def fact(fact):
-    """Fetches the specific fact from PuppetDB and displays its value per
-    node for which this fact is known."""
-    # we can only consume the generator once, lists can be doubly consumed
-    # om nom nom
+@app.route('/fact/<fact>',
+           defaults={'env': app.config['DEFAULT_ENVIRONMENT'], 'value': None})
+@app.route('/<env>/fact/<fact>', defaults={'value': None})
+@app.route('/fact/<fact>/<value>',
+           defaults={'env': app.config['DEFAULT_ENVIRONMENT']})
+@app.route('/<env>/fact/<fact>/<value>')
+def fact(env, fact, value):
+    """Fetches the specific fact(/value) from PuppetDB and displays per
+    node for which this fact is known.
+
+    :param env: Searches for facts in this environment
+    :type env: :obj:`string`
+    :param fact: Find all facts with this name
+    :type fact: :obj:`string`
+    :param value: Find all facts with this value
+    :type value: :obj:`string`
+    """
+    envs = environments()
+    check_env(env, envs)
+
     render_graph = False
-    if fact in graph_facts:
+    if fact in graph_facts and not value:
         render_graph = True
-    localfacts = [f for f in yield_or_stop(puppetdb.facts(name=fact))]
-    return Response(stream_with_context(stream_template(
-        'fact.html',
-        name=fact,
-        render_graph=render_graph,
-        facts=localfacts)))
 
+    value_safe = value
+    if value is not None:
+        value_safe = unquote_plus(value)
 
-@app.route('/fact/<fact>/<value>')
-def fact_value(fact, value):
-    """On asking for fact/value get all nodes with that fact."""
-    facts = get_or_abort(puppetdb.facts, fact, value)
-    localfacts = [f for f in yield_or_stop(facts)]
     return render_template(
         'fact.html',
-        name=fact,
+        fact=fact,
         value=value,
-        facts=localfacts)
+        value_safe=value_safe,
+        render_graph=render_graph,
+        envs=envs,
+        current_env=env)
 
 
-@app.route('/query', methods=('GET', 'POST'))
-def query():
+@app.route('/fact/<fact>/json',
+           defaults={'env': app.config['DEFAULT_ENVIRONMENT'],
+                     'node': None, 'value': None})
+@app.route('/<env>/fact/<fact>/json', defaults={'node': None, 'value': None})
+@app.route('/fact/<fact>/<value>/json',
+           defaults={'env': app.config['DEFAULT_ENVIRONMENT'], 'node': None})
+@app.route('/fact/<fact>/<path:value>/json',
+           defaults={'env': app.config['DEFAULT_ENVIRONMENT'], 'node': None})
+@app.route('/<env>/fact/<fact>/<value>/json', defaults={'node': None})
+@app.route('/node/<node>/facts/json',
+           defaults={'env': app.config['DEFAULT_ENVIRONMENT'],
+                     'fact': None, 'value': None})
+@app.route('/<env>/node/<node>/facts/json',
+           defaults={'fact': None, 'value': None})
+def fact_ajax(env, node, fact, value):
+    """Fetches the specific facts matching (node/fact/value) from PuppetDB and
+    return a JSON table
+
+    :param env: Searches for facts in this environment
+    :type env: :obj:`string`
+    :param node: Find all facts for this node
+    :type node: :obj:`string`
+    :param fact: Find all facts with this name
+    :type fact: :obj:`string`
+    :param value: Filter facts whose value is equal to this
+    :type value: :obj:`string`
+    """
+    draw = int(request.args.get('draw', 0))
+
+    envs = environments()
+    check_env(env, envs)
+
+    render_graph = False
+    if fact in graph_facts and not value and not node:
+        render_graph = True
+
+    query = AndOperator()
+    if node:
+        query.add(EqualsOperator("certname", node))
+
+    if env != '*':
+        query.add(EqualsOperator("environment", env))
+
+    if len(query.operations) == 0:
+        query = None
+
+    # Generator needs to be converted (graph / total)
+    try:
+        value = int(value)
+    except ValueError:
+        if value is not None:
+            query.add(EqualsOperator('value', unquote_plus(value)))
+    except TypeError:
+        pass
+
+    facts = [f for f in get_or_abort(
+        puppetdb.facts,
+        name=fact,
+        query=query)]
+
+    total = len(facts)
+
+    counts = {}
+    json = {
+        'draw': draw,
+        'recordsTotal': total,
+        'recordsFiltered': total,
+        'data': []}
+
+    for fact_h in facts:
+        line = []
+        if not fact:
+            line.append(fact_h.name)
+        if not node:
+            line.append('<a href="{0}">{1}</a>'.format(
+                url_for('node', env=env, node_name=fact_h.node),
+                fact_h.node))
+        if not value:
+            fact_value = fact_h.value
+            if isinstance(fact_value, unicode) or isinstance(fact_value, str):
+                fact_value = quote_plus(fact_h.value)
+
+            line.append('<a href="{0}">{1}</a>'.format(
+                url_for(
+                    'fact', env=env, fact=fact_h.name, value=fact_value),
+                fact_h.value))
+
+        json['data'].append(line)
+
+        if render_graph:
+            if fact_h.value not in counts:
+                counts[fact_h.value] = 0
+            counts[fact_h.value] += 1
+
+    if render_graph:
+        json['chart'] = [
+            {"label": "{0}".format(k).replace('\n', ' '),
+             "value": counts[k]}
+            for k in sorted(counts, key=lambda k: counts[k], reverse=True)]
+
+    return jsonify(json)
+
+
+@app.route('/query', methods=('GET', 'POST'),
+           defaults={'env': app.config['DEFAULT_ENVIRONMENT']})
+@app.route('/<env>/query', methods=('GET', 'POST'))
+def query(env):
     """Allows to execute raw, user created querries against PuppetDB. This is
     currently highly experimental and explodes in interesting ways since none
     of the possible exceptions are being handled just yet. This will return
     the JSON of the response or a message telling you what whent wrong /
-    why nothing was returned."""
+    why nothing was returned.
+
+    :param env: Serves no purpose for the query data but is required for the
+        select field in the environment block
+    :type env: :obj:`string`
+    """
     if app.config['ENABLE_QUERY']:
-        form = QueryForm()
+        envs = environments()
+        check_env(env, envs)
+
+        form = QueryForm(meta={
+            'csrf_secret': app.config['SECRET_KEY'],
+            'csrf_context': session})
         if form.validate_on_submit():
-            if form.query.data[0] == '[':
+            if form.endpoints.data == 'pql':
+                query = form.query.data
+            elif form.query.data[0] == '[':
                 query = form.query.data
             else:
                 query = '[{0}]'.format(form.query.data)
@@ -383,26 +776,331 @@ def query():
                 puppetdb._query,
                 form.endpoints.data,
                 query=query)
-            return render_template('query.html', form=form, result=result)
-        return render_template('query.html', form=form)
+            return render_template('query.html',
+                                   form=form,
+                                   result=result,
+                                   envs=envs,
+                                   current_env=env)
+        return render_template('query.html',
+                               form=form,
+                               envs=envs,
+                               current_env=env)
     else:
         log.warn('Access to query interface disabled by administrator..')
         abort(403)
 
 
-@app.route('/metrics')
-def metrics():
-    metrics = get_or_abort(puppetdb._query, 'metrics', path='mbeans')
-    for key, value in metrics.items():
-        metrics[key] = value.split('/')[3]
-    return render_template('metrics.html', metrics=sorted(metrics.items()))
+@app.route('/metrics', defaults={'env': app.config['DEFAULT_ENVIRONMENT']})
+@app.route('/<env>/metrics')
+def metrics(env):
+    """Lists all available metrics that PuppetDB is aware of.
+
+    :param env: While this parameter serves no function purpose it is required
+        for the environments template block
+    :type env: :obj:`string`
+    """
+    envs = environments()
+    check_env(env, envs)
+
+    metrics = get_or_abort(puppetdb._query, 'mbean')
+    return render_template('metrics.html',
+                           metrics=sorted(metrics.keys()),
+                           envs=envs,
+                           current_env=env)
 
 
-@app.route('/metric/<metric>')
-def metric(metric):
+@app.route('/metric/<path:metric>',
+           defaults={'env': app.config['DEFAULT_ENVIRONMENT']})
+@app.route('/<env>/metric/<path:metric>')
+def metric(env, metric):
+    """Lists all information about the metric of the given name.
+
+    :param env: While this parameter serves no function purpose it is required
+        for the environments template block
+    :type env: :obj:`string`
+    """
+    envs = environments()
+    check_env(env, envs)
+
     name = unquote(metric)
-    metric = puppetdb.metric(metric)
+    metric = get_or_abort(puppetdb.metric, metric)
     return render_template(
         'metric.html',
         name=name,
-        metric=sorted(metric.items()))
+        metric=sorted(metric.items()),
+        envs=envs,
+        current_env=env)
+
+
+@app.route('/catalogs',
+           defaults={'env': app.config['DEFAULT_ENVIRONMENT'],
+                     'compare': None})
+@app.route('/<env>/catalogs', defaults={'compare': None})
+@app.route('/catalogs/compare/<compare>',
+           defaults={'env': app.config['DEFAULT_ENVIRONMENT']})
+@app.route('/<env>/catalogs/compare/<compare>')
+def catalogs(env, compare):
+    """Lists all nodes with a compiled catalog.
+
+    :param env: Find the nodes with this catalog_environment value
+    :type env: :obj:`string`
+    """
+    envs = environments()
+    check_env(env, envs)
+
+    if not app.config['ENABLE_CATALOG']:
+        log.warn('Access to catalog interface disabled by administrator')
+        abort(403)
+
+    return render_template(
+        'catalogs.html',
+        compare=compare,
+        columns=CATALOGS_COLUMNS,
+        envs=envs,
+        current_env=env)
+
+
+@app.route('/catalogs/json',
+           defaults={'env': app.config['DEFAULT_ENVIRONMENT'],
+                     'compare': None})
+@app.route('/<env>/catalogs/json', defaults={'compare': None})
+@app.route('/catalogs/compare/<compare>/json',
+           defaults={'env': app.config['DEFAULT_ENVIRONMENT']})
+@app.route('/<env>/catalogs/compare/<compare>/json')
+def catalogs_ajax(env, compare):
+    """Server data to catalogs as JSON to Jquery datatables
+    """
+    draw = int(request.args.get('draw', 0))
+    start = int(request.args.get('start', 0))
+    length = int(request.args.get('length', app.config['NORMAL_TABLE_COUNT']))
+    paging_args = {'limit': length, 'offset': start}
+    search_arg = request.args.get('search[value]')
+    order_column = int(request.args.get('order[0][column]', 0))
+    order_filter = CATALOGS_COLUMNS[order_column].get(
+        'filter', CATALOGS_COLUMNS[order_column]['attr'])
+    order_dir = request.args.get('order[0][dir]', 'asc')
+    order_args = '[{"field": "%s", "order": "%s"}]' % (order_filter, order_dir)
+
+    envs = environments()
+    check_env(env, envs)
+
+    query = AndOperator()
+    if env != '*':
+        query.add(EqualsOperator("catalog_environment", env))
+    if search_arg:
+        query.add(RegexOperator("certname", r"%s" % search_arg))
+    query.add(NullOperator("catalog_timestamp", False))
+
+    nodes = get_or_abort(puppetdb.nodes,
+                         query=query,
+                         include_total=True,
+                         order_by=order_args,
+                         **paging_args)
+
+    catalog_list = []
+    total = None
+    for node in nodes:
+        if total is None:
+            total = puppetdb.total
+
+        catalog_list.append({
+            'certname': node.name,
+            'catalog_timestamp': node.catalog_timestamp,
+            'form': compare,
+        })
+
+    if total is None:
+        total = 0
+
+    return render_template(
+        'catalogs.json.tpl',
+        total=total,
+        total_filtered=total,
+        draw=draw,
+        columns=CATALOGS_COLUMNS,
+        catalogs=catalog_list,
+        envs=envs,
+        current_env=env)
+
+
+@app.route('/catalog/<node_name>',
+           defaults={'env': app.config['DEFAULT_ENVIRONMENT']})
+@app.route('/<env>/catalog/<node_name>')
+def catalog_node(env, node_name):
+    """Fetches from PuppetDB the compiled catalog of a given node.
+
+    :param env: Find the catalog with this environment value
+    :type env: :obj:`string`
+    """
+    envs = environments()
+    check_env(env, envs)
+
+    if app.config['ENABLE_CATALOG']:
+        catalog = get_or_abort(puppetdb.catalog,
+                               node=node_name)
+        return render_template('catalog.html',
+                               catalog=catalog,
+                               envs=envs,
+                               current_env=env)
+    else:
+        log.warn('Access to catalog interface disabled by administrator')
+        abort(403)
+
+
+@app.route('/catalogs/compare/<compare>...<against>',
+           defaults={'env': app.config['DEFAULT_ENVIRONMENT']})
+@app.route('/<env>/catalogs/compare/<compare>...<against>')
+def catalog_compare(env, compare, against):
+    """Compares the catalog of one node, parameter compare, with that of
+       with that of another node, parameter against.
+
+    :param env: Ensure that the 2 catalogs are in the same environment
+    :type env: :obj:`string`
+    """
+    envs = environments()
+    check_env(env, envs)
+
+    if app.config['ENABLE_CATALOG']:
+        compare_cat = get_or_abort(puppetdb.catalog,
+                                   node=compare)
+        against_cat = get_or_abort(puppetdb.catalog,
+                                   node=against)
+
+        return render_template('catalog_compare.html',
+                               compare=compare_cat,
+                               against=against_cat,
+                               envs=envs,
+                               current_env=env)
+    else:
+        log.warn('Access to catalog interface disabled by administrator')
+        abort(403)
+
+
+@app.route('/radiator', defaults={'env': app.config['DEFAULT_ENVIRONMENT']})
+@app.route('/<env>/radiator')
+def radiator(env):
+    """This view generates a simplified monitoring page
+    akin to the radiator view in puppet dashboard
+    """
+    envs = environments()
+    check_env(env, envs)
+
+    if env == '*':
+        query_type = ''
+        if get_db_version(puppetdb) < (4, 0, 0):
+            query_type = 'type=default,'
+        query = None
+        metrics = get_or_abort(
+            puppetdb.metric,
+            'puppetlabs.puppetdb.population:%sname=num-nodes' % query_type)
+        num_nodes = metrics['Value']
+    else:
+        query = AndOperator()
+        metric_query = ExtractOperator()
+
+        query.add(EqualsOperator("catalog_environment", env))
+        query.add(EqualsOperator("facts_environment", env))
+        metric_query.add_field(FunctionOperator('count'))
+        metric_query.add_query(query)
+
+        metrics = get_or_abort(
+            puppetdb._query,
+            'nodes',
+            query=metric_query)
+        num_nodes = metrics[0]['count']
+
+    nodes = puppetdb.nodes(
+        query=query,
+        unreported=app.config['UNRESPONSIVE_HOURS'],
+        with_status=True
+    )
+
+    stats = {
+        'changed_percent': 0,
+        'changed': 0,
+        'failed_percent': 0,
+        'failed': 0,
+        'noop_percent': 0,
+        'noop': 0,
+        'skipped_percent': 0,
+        'skipped': 0,
+        'unchanged_percent': 0,
+        'unchanged': 0,
+        'unreported_percent': 0,
+        'unreported': 0,
+    }
+
+    for node in nodes:
+        if node.status == 'unreported':
+            stats['unreported'] += 1
+        elif node.status == 'changed':
+            stats['changed'] += 1
+        elif node.status == 'failed':
+            stats['failed'] += 1
+        elif node.status == 'noop':
+            stats['noop'] += 1
+        elif node.status == 'skipped':
+            stats['skipped'] += 1
+        else:
+            stats['unchanged'] += 1
+
+    try:
+        stats['changed_percent'] = int(100 * (stats['changed'] /
+                                              float(num_nodes)))
+        stats['failed_percent'] = int(100 * stats['failed'] / float(num_nodes))
+        stats['noop_percent'] = int(100 * stats['noop'] / float(num_nodes))
+        stats['skipped_percent'] = int(100 * (stats['skipped'] /
+                                              float(num_nodes)))
+        stats['unchanged_percent'] = int(100 * (stats['unchanged'] /
+                                                float(num_nodes)))
+        stats['unreported_percent'] = int(100 * (stats['unreported'] /
+                                                 float(num_nodes)))
+    except ZeroDivisionError:
+        stats['changed_percent'] = 0
+        stats['failed_percent'] = 0
+        stats['noop_percent'] = 0
+        stats['skipped_percent'] = 0
+        stats['unchanged_percent'] = 0
+        stats['unreported_percent'] = 0
+
+    if ('Accept' in request.headers and
+            request.headers["Accept"] == 'application/json'):
+        return jsonify(**stats)
+
+    return render_template(
+        'radiator.html',
+        stats=stats,
+        total=num_nodes
+    )
+
+
+@app.route('/daily_reports_chart.json',
+           defaults={'env': app.config['DEFAULT_ENVIRONMENT']})
+@app.route('/<env>/daily_reports_chart.json')
+def daily_reports_chart(env):
+    """Return JSON data to generate a bar chart of daily runs.
+
+    If certname is passed as GET argument, the data will target that
+    node only.
+    """
+    certname = request.args.get('certname')
+    result = get_or_abort(
+        get_daily_reports_chart,
+        db=puppetdb,
+        env=env,
+        days_number=app.config['DAILY_REPORTS_CHART_DAYS'],
+        certname=certname,
+    )
+    return jsonify(result=result)
+
+
+@app.route('/offline/<path:filename>')
+def offline_static(filename):
+    mimetype = 'text/html'
+    if filename.endswith('.css'):
+        mimetype = 'text/css'
+    elif filename.endswith('.js'):
+        mimetype = 'text/javascript'
+
+    return Response(response=render_template('static/%s' % filename),
+                    status=200, mimetype=mimetype)

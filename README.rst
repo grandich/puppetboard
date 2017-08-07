@@ -2,22 +2,31 @@
 Puppetboard
 ###########
 
+.. image:: https://travis-ci.org/voxpupuli/puppetboard.svg?branch=master
+   :target:  https://travis-ci.org/voxpupuli/puppetboard
+
+.. image:: https://coveralls.io/repos/github/voxpupuli/puppetboard/badge.svg?branch=master
+   :target:  https://coveralls.io/github/voxpupuli/puppetboard?branch=master
+
 Puppetboard is a web interface to `PuppetDB`_ aiming to replace the reporting
 functionality of `Puppet Dashboard`_.
 
 Puppetboard relies on the `pypuppetdb`_ library to fetch data from PuppetDB
 and is built with the help of the `Flask`_ microframework.
 
+As of version 0.1.0 and higher, Puppetboard **requires** PuppetDB 3.
+
 .. _pypuppetdb: https://pypi.python.org/pypi/pypuppetdb
 .. _PuppetDB: http://docs.puppetlabs.com/puppetdb/latest/index.html
 .. _Puppet Dashboard: http://docs.puppetlabs.com/dashboard/
 .. _Flask: http://flask.pocoo.org
+.. _FlaskSession: http://flask.pocoo.org/docs/0.11/quickstart/#sessions
 
 At the current time of writing, Puppetboard supports the following Python versions:
     * Python 2.6
     * Python 2.7
 
-.. image:: https://raw.github.com/nedap/puppetboard/master/screenshots/overview.png
+.. image:: screenshots/overview.png
    :alt: View of a node
    :width: 1024
    :height: 700
@@ -51,10 +60,10 @@ There is a `Puppet module`_ by `Spencer Krum`_ that takes care of installing Pup
 
 You can install it with:
 
-    puppet module install nibalizer-puppetboard
+    puppet module install puppet-puppetboard
 
 .. _Spencer Krum: https://github.com/nibalizer
-.. _Puppet module: https://forge.puppetlabs.com/nibalizer/puppetboard
+.. _Puppet module: https://forge.puppetlabs.com/puppet/puppetboard
 
 Manual
 ^^^^^^
@@ -69,7 +78,7 @@ This will install Puppetboard and take care of the dependencies. If you
 do this Puppetboard will be installed in the so called site-packages or
 dist-packages of your Python distribution.
 
-The complete path on Debian and Ubuntu systems would be ``/usr/local/lib/pythonX.Y/lib/dist-packages/puppetboard`` and on Fedora would be ``/usr/lib/pythonX.Y/lib/site-packages/puppetboard``
+The complete path on Debian and Ubuntu systems would be ``/usr/local/lib/pythonX.Y/lib/dist-packages/puppetboard`` and on Fedora would be ``/usr/lib/pythonX.Y/site-packages/puppetboard``
 
 where X and Y are replaced by your major and minor python versions.
 
@@ -99,19 +108,40 @@ Native packages for your operating system will be provided in the near future.
 +-------------------+-----------+--------------------------------------------+
 | `SuSE LE 11 SP3`_ | available | Maintained on `OpenSuSE Build Service`_    |
 +-------------------+-----------+--------------------------------------------+
-| `ArchLinux`_      | available | Maintained by `Niels Abspoel`_             |
+| `ArchLinux`_      | available | Maintained by `Tim Meusel`_                |
 +-------------------+-----------+--------------------------------------------+
-| `OpenBSD`_        | available | Maintained by `Jasper Lievisse Adriaanse`_ |
+| `OpenBSD`_        | available | Maintained by `Sebastian Reitenbach`_      |
 +-------------------+-----------+--------------------------------------------+
 
 .. _ArchLinux: https://aur.archlinux.org/packages/python2-puppetboard/
-.. _Niels Abspoel: https://github.com/aboe76
-.. _Jasper Lievisse Adriaanse: https://github.com/jasperla
+.. _Tim Meusel: https://github.com/bastelfreak
+.. _Sebastian Reitenbach: https://github.com/buzzdeee
 .. _OpenBSD: http://www.openbsd.org/cgi-bin/cvsweb/ports/www/puppetboard/
 .. _OpenSuSE Build Service: https://build.opensuse.org/package/show/systemsmanagement:puppet/python-puppetboard
 .. _OpenSuSE 12/13: https://build.opensuse.org/package/show/systemsmanagement:puppet/python-puppetboard
 .. _SuSE LE 11 SP3: https://build.opensuse.org/package/show/systemsmanagement:puppet/python-puppetboard
 
+Docker Images
+^^^^^^^^^^^^^
+
+A `Dockerfile`_ was added to the source-code in the 0.2.0 release. An officially
+image is planned for the 0.2.x series.
+
+.. _Dockerfile: https://github.com/voxpupuli/puppetboard/blob/master/Dockerfile
+
+Usage:
+.. code-block:: bash
+  $ docker build -t puppetboard .
+  $ docker run -it -p 9080:80 -v /etc/puppetlabs/puppet/ssl:/etc/puppetlabs/puppet/ssl \
+    -e PUPPETDB_HOST=<hostname> \
+    -e PUPPETDB_PORT=8081 \
+    -e PUPPETDB_SSL_VERIFY=/etc/puppetlabs/puppetdb/ssl/ca.pem \
+    -e PUPPETDB_KEY=/etc/puppetlabs/puppetdb/ssl/private.pem \
+    -e PUPPETDB_CERT=/etc/puppetlabs/puppetdb/ssl/public.pem \
+    -e INVENTORY_FACTS='Hostname,fqdn, IP Address,ipaddress' \
+    -e ENABLE_CATALOG=true \
+    -e GRAPH_FACTS='architecture,puppetversion,osfamily' \
+    puppetboard
 
 Development
 -----------
@@ -121,7 +151,7 @@ and then install the requirements through:
 
 .. code-block:: bash
 
-   $ pip install -r requirements.txt
+   $ pip install -r requirements-test.txt
 
 You're advised to do this inside a virtualenv specifically created to work on
 Puppetboard as to not pollute your global Python installation.
@@ -172,10 +202,11 @@ connect. Therefor you'll also have to supply the following settings:
 For information about how to generate the correct keys please refer to the
 `pypuppetdb documentation`_.
 
-Other settings that might be interesting:
+Other settings that might be interesting in no particular order:
 
 * ``SECRET_KEY``: Refer to `Flask documentation`_, section sessions: How to
-  generate good secret keys, to set the value.
+  generate good secret keys, to set the value. Defaults to a random 24-char
+  string generated by os.random(24)
 * ``PUPPETDB_TIMEOUT``: Defaults to 20 seconds but you might need to increase
   this value. It depends on how big the results are when querying PuppetDB.
   This behaviour will change in a future release when pagination will be
@@ -188,9 +219,47 @@ Other settings that might be interesting:
 * ``ENABLE_QUERY``: Defaults to ``True`` causing a Query tab to show up in the
   web interface allowing users to write and execute arbitrary queries against
   a set of endpoints in PuppetDB. Change this to ``False`` to disable this.
+* ``GRAPH_TYPE```: Specify the type of graph to display.   Default is
+  pie, other good option is donut.   Other choices can be found here:
+  `_C3JS_documentation`
+* ``GRAPH_FACTS``: A list of fact names to tell PuppetBoard to generate a
+  pie-chart on the fact page. With some fact values being unique per node,
+  like ipaddress, uuid, and serial number, as well as structured facts it was
+  no longer feasible to generate a graph for everything.
+* ``INVENTORY_FACTS``: A list of tuples that serve as the column header and
+  the fact name to search for to create the inventory page. If a fact is not
+  found for a node then ``undef`` is printed.
+* ``ENABLE_CATALOG``: If set to ``True`` allows the user to view a node's
+  latest catalog. This includes all managed resources, their file-system
+  locations and their relationships, if available. Defaults to ``False``.
+* ``REFRESH_RATE``: Defaults to ``30`` the number of seconds to wait until
+  the index page is automatically refreshed.
+* ``DEFAULT_ENVIRONMENT``: Defaults to ``'production'``, as the name
+  suggests, load all information filtered by this environment value.
+* ``REPORTS_COUNT``: Defaults to ``10`` the limit of the number of reports
+  to load on the node or any reports page.
+* ``OFFLINE_MODE``: If set to ``True`` load static assets (jquery,
+  semantic-ui, etc) from the local web server instead of a CDN.
+  Defaults to ``False``.
+* ``DAILY_REPORTS_CHART_ENABLED``: Enable the use of daily chart graphs when
+  looking at dashboard and node view.
+* ``DAILY_REPORTS_CHART_DAYS``: Number of days to show history for on the daily
+  report graphs.
+* ``DISPLAYED_METRICS``: Metrics to show when displying node summary. Example:
+  ``'resources.total'``, ``'events.noop'``.
+* ``TABLE_COUNT_SELECTOR``: Configure the dropdown to limit number of hosts to
+  show per page.
+* ``LITTLE_TABLE_COUNT``: Default number of reports to show when when looking at a node.
+* ``NORMAL_TABLE_COUNT``: Default number of nodes to show when displaying reports
+  and catalog nodes.
+* ``LOCALISE_TIMESTAMP``: Normalize time based on localserver time.
+* ``DEV_LISTEN_HOST``: For use with `dev.py` for development.  Default is localhost
+* ``DEV_LISTEN_PORT``: For use with `dev.py` for development.  Default is 5000
+
 
 .. _pypuppetdb documentation: http://pypuppetdb.readthedocs.org/en/v0.1.0/quickstart.html#ssl
 .. _Flask documentation: http://flask.pocoo.org/docs/0.10/quickstart/#sessions
+.. _C3JS_documentation:  http://c3js.org/examples.html#chart
 
 Puppet Enterprise
 -----------------
@@ -231,6 +300,14 @@ scenarios:
 If you deploy Puppetboard through a different setup we'd welcome a pull
 request that adds the instructions to this section.
 
+Installation On Linux Distros
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+`Debian Jessie Install`_.
+
+.. _Debian Jessie Install: docs/Debian-Jessie.md
+
+
 Apache + mod_wsgi
 ^^^^^^^^^^^^^^^^^
 
@@ -238,7 +315,7 @@ First we need to create the necessary directories:
 
 .. code-block:: bash
 
-   $ mkdir -p /var/www/puppetboard
+   $ mkdir -p /var/www/html/puppetboard
 
 Copy Puppetboard's ``default_settings.py`` to the newly created puppetboard
 directory and name the file ``settings.py``. This file will be available
@@ -260,10 +337,30 @@ puppetboard directory:
     import os
 
     # Needed if a settings.py file exists
-    os.environ['PUPPETBOARD_SETTINGS'] = '/var/www/puppetboard/settings.py'
+    os.environ['PUPPETBOARD_SETTINGS'] = '/var/www/html/puppetboard/settings.py'
     from puppetboard.app import app as application
 
 Make sure this file is readable by the user the webserver runs as.
+
+Flask requires a static secret_key, see `FlaskSession`_, in order to protect
+itself from CSRF exploits.  The default secret_key in ``default_settings.py``
+generates a random 24 character string, however this string is re-generated
+on each request under httpd >= 2.4.
+
+To generate your own secret_key create a python script with the following content
+and run it once:
+
+.. code-block:: python
+
+    import os
+    os.urandom(24)
+    '\xfd{H\xe5<\x95\xf9\xe3\x96.5\xd1\x01O<!\xd5\xa2\xa0\x9fR"\xa1\xa8'
+
+Copy the output and add the following to your ``wsgi.py`` file:
+
+.. code-block:: python
+
+   application.secret_key = '<your secret key>'
 
 The last thing we need to do is configure Apache.
 
@@ -274,12 +371,12 @@ Here is a sample configuration for Debian and Ubuntu:
     <VirtualHost *:80>
         ServerName puppetboard.example.tld
         WSGIDaemonProcess puppetboard user=www-data group=www-data threads=5
-        WSGIScriptAlias / /var/www/puppetboard/wsgi.py
+        WSGIScriptAlias / /var/www/html/puppetboard/wsgi.py
         ErrorLog /var/log/apache2/puppetboard.error.log
         CustomLog /var/log/apache2/puppetboard.access.log combined
 
         Alias /static /usr/local/lib/pythonX.Y/dist-packages/puppetboard/static
-        <Directory /usr/lib/python2.X/dist-packages/puppetboard/static>
+        <Directory /usr/local/lib/pythonX.X/dist-packages/puppetboard/static>
             Satisfy Any
             Allow from all
         </Directory>
@@ -299,11 +396,11 @@ Here is a sample configuration for Fedora:
     <VirtualHost *:80>
         ServerName puppetboard.example.tld
         WSGIDaemonProcess puppetboard user=apache group=apache threads=5
-        WSGIScriptAlias / /var/www/puppetboard/wsgi.py
-        ErrorLog /var/log/httpd/puppetboard.error.log
-        CustomLog /var/log/httpd/puppetboard.access.log combined
+        WSGIScriptAlias / /var/www/html/puppetboard/wsgi.py
+        ErrorLog logs/puppetboard-error_log
+        CustomLog logs/puppetboard-access_log combined
 
-        Alias /static /usr/local/lib/pythonX.Y/site-packages/puppetboard/static
+        Alias /static /usr/lib/pythonX.Y/site-packages/puppetboard/static
         <Directory /usr/lib/python2.X/site-packages/puppetboard/static>
             Satisfy Any
             Allow from all
@@ -479,10 +576,6 @@ differ too much. As we can't use ``uwsgi_pass`` with gunicorn, the nginx configu
 
 .. code-block:: nginx
 
-    upstream puppetboard {
-        server 127.0.0.1:9090;
-    }
-
     server {
         listen      80;
         server_name puppetboard.example.tld;
@@ -587,16 +680,19 @@ This project is still very new so it's not inconceivable you'll run into
 issues.
 
 For bug reports you can file an `issue`_. If you need help with something
-feel free to hit up `@daenney`_ by e-mail or find him on IRC. He can usually
-be found on `IRCnet`_ and `Freenode`_ and idles in #puppet.
+feel free to hit up the maintainers by e-mail or on IRC. They can usually
+be found on `IRCnet`_ and `Freenode`_ and idles in #puppetboard.
 
 There's now also the #puppetboard channel on `Freenode`_ where we hang out
 and answer questions related to pypuppetdb and Puppetboard.
 
-.. _issue: https://github.com/nedap/puppetboard/issues
-.. _@daenney: https://github.com/daenney
+There is also a `GoogleGroup`_ to exchange questions and discussions. Please
+note that this group contains discussions of other Puppet Community projects.
+
+.. _issue: https://github.com/voxpupuli/puppetboard/issues
 .. _IRCnet: http://www.ircnet.org
 .. _Freenode: http://freenode.net
+.. _GoogleGroup: https://groups.google.com/forum/?hl=en#!forum/puppet-community
 
 Third party
 ===========
@@ -610,11 +706,11 @@ Some people have already started building things with and around Puppetboard.
 
 Packages
 --------
-* An OpenBSD port is being maintained by `Jasper Lievisse Adriaanse`_ and can be viewed `here <http://www.openbsd.org/cgi-bin/cvsweb/ports/www/puppetboard/>`_.
+* An OpenBSD port is being maintained by `Sebastian Reitenbach`_ and can be viewed `here <http://www.openbsd.org/cgi-bin/cvsweb/ports/www/puppetboard/>`_.
 
 * A Docker image is being maintained by `Julien K.`_ and can be viewed `here <https://registry.hub.docker.com/u/kassis/puppetboard/>`_.
 
-.. _Jasper Lievisse Adriaanse: https://github.com/jasperla
+.. _Sebastian Reitenbach: https://github.com/buzzdeee
 .. _Julien K.: https://github.com/juliengk
 
 Contributing
@@ -649,70 +745,79 @@ messages have a look at this post by `Tim Pope`_.
 
 .. _Tim Pope: http://tbaggery.com/2008/04/19/a-note-about-git-commit-messages.html
 
+Examples
+========
+
+`vagrant-puppetboard`_
+
+.. _vagrant-puppetboard: https://github.com/visibilityspots/vagrant-puppet/tree/puppetboard
+
+A vagrant project to show off the puppetboard functionallity using the puppetboard puppet module on a puppetserver with puppetdb.
+
 Screenshots
 ===========
 
-.. image:: https://raw.github.com/nedap/puppetboard/master/screenshots/overview.png
+.. image:: screenshots/overview.png
    :alt: Overview / Index / Homepage
    :width: 1024
    :height: 700
    :align: center
 
-.. image:: https://raw.github.com/nedap/puppetboard/master/screenshots/nodes.png
+.. image:: screenshots/nodes.png
    :alt: Nodes view, all active nodes
    :width: 1024
    :height: 700
    :align: center
 
-.. image:: https://raw.github.com/nedap/puppetboard/master/screenshots/node.png
+.. image:: screenshots/node.png
    :alt: Single node page / overview
    :width: 1024
    :height: 700
    :align: center
 
-.. image:: https://raw.github.com/nedap/puppetboard/master/screenshots/report.png
+.. image:: screenshots/report.png
    :alt: Report view
    :width: 1024
    :height: 700
    :align: center
 
-.. image:: https://raw.github.com/nedap/puppetboard/master/screenshots/facts.png
+.. image:: screenshots/facts.png
    :alt: Facts view
    :width: 1024
    :height: 700
    :align: center
 
-.. image:: https://raw.github.com/nedap/puppetboard/master/screenshots/fact.png
+.. image:: screenshots/fact.png
    :alt: Single fact, with graphs
    :width: 1024
    :height: 700
    :align: center
 
-.. image:: https://raw.github.com/nedap/puppetboard/master/screenshots/fact_value.png
+.. image:: screenshots/fact_value.png
    :alt: All nodes that have this fact with that value
    :width: 1024
    :height: 700
    :align: center
 
-.. image:: https://raw.github.com/nedap/puppetboard/master/screenshots/metrics.png
+.. image:: screenshots/metrics.png
    :alt: Metrics view
    :width: 1024
    :height: 700
    :align: center
 
-.. image:: https://raw.github.com/nedap/puppetboard/master/screenshots/metric.png
+.. image:: screenshots/metric.png
    :alt: Single metric
    :width: 1024
    :height: 700
    :align: center
 
-.. image:: https://raw.github.com/nedap/puppetboard/master/screenshots/query.png
+.. image:: screenshots/query.png
    :alt: Query view
    :width: 1024
    :height: 700
    :align: center
 
-.. image:: https://raw.github.com/nedap/puppetboard/master/screenshots/broken.png
+.. image:: screenshots/broken.png
    :alt: Error page
    :width: 1024
    :height: 700

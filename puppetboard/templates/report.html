@@ -4,7 +4,7 @@
 <table class='ui basic table'>
   <thead>
     <tr>
-      <th>Hostname</th>
+      <th>Certname</th>
       <th>Configuration version</th>
       <th>Start time</th>
       <th>End time</th>
@@ -12,9 +12,9 @@
   </thead>
   <tbody>
     <tr>
-      <td><a href="{{url_for('node', node_name=report.node)}}">{{ report.node }}</a></td>
+      <td><a href="{{url_for('node', env=current_env, node_name=report.node)}}">{{ report.node }}</a></td>
       <td>
-        {{report.version}}
+        {{report.version|safe}}
       </td>
       <td rel="utctimestamp">
         {{report.start}}
@@ -27,47 +27,83 @@
 </table>
 
 <h1>Events</h1>
-<table class='ui basic table compact'>
+<table class='ui basic compact fixed wrapped table'>
   <thead>
     <tr>
-      <th>Resource</th>
-      <th>Status</th>
-      <th>Message</th>
+      <th class="four wide">Resource</th>
+      <th class="two wide">Status</th>
+      <th class="eight wide">Message</th>
     </tr>
   </thead>
   <tbody>
     {% for event in events %}
     {% if not event.failed and event.item['old'] != event.item['new'] %}
-      <tr id='event-{{loop.index}}' class='positive'>
+      <tr id='event-{{loop.index}}' class='ui line changed'>
     {% elif event.failed %}
-      <tr id='event-{{loop.index}}' class='error'>
+      <tr id='event-{{loop.index}}' class='ui line failed'>
+    {% else %}
+      <tr id='event-{{loop.index}}' class='ui line {{event.status}}'>
     {% endif %}
       <td>{{event.item['type']}}[{{event.item['title']}}]</td>
       <td>{{event.status}}</td>
-      {#<td>{{event.item['old']}}</td>
-      <td>{{event.item['new']}}</td>#}
 	  <td>{{event.item['message']}}</td>
     </tr>
-{#        <tr>
-      <td class='message' colspan='4'>
-        <div id='message-event-{{loop.index}}'>
-          {{event.item['message']}}
-        </div>
-      </td>
-    </tr>#}
+    {% endfor %}
+  </tbody>
+</table>
+
+<h1>Logs</h1>
+<table class='ui basic compact fixed wrapped table'>
+  <thead>
+    <tr>
+      <th>Timestamp</th>
+      <th>Source</th>
+      <th>Tags</th>
+      <th>Message</th>
+      <th>Location</th>
+    <tr>
+  </thead>
+  <tbody>
+    {% for log in logs %}
+      {% if log.level == 'info' or log.level == 'notice' %}
+        <tr class='positive'>
+      {% elif log.level == 'warning' %}
+        <tr class='warning'>
+      {% else %}
+        <tr class='error'>
+      {% endif %}
+        <td rel="utctimestamp">{{log.time}}</td>
+        <td>{{log.source}}</td>
+        <td>{{log.tags|join(', ')}}</td>
+        <td>{{log.message}}</td>
+        {% if log.file != None and log.line != None %}
+          <td>{{log.file}}:{{log.line}}</td>
+        {% else %}
+          <td></td>
+        {% endif %}
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h1>Metrics</h1>
+<table class="ui basic table compact">
+  <thead>
+    <tr>
+      <th>Category</th>
+      <th>Name</th>
+      <th>Value</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for metric in metrics %}
+      <tr>
+        <td>{{metric.category}}</td>
+        <td>{{metric.name}}</td>
+        <td>{{metric.value|round(2)}}</td>
+      </tr>
     {% endfor %}
   </tbody>
 </table>
 
 {% endblock content %}
-{% block script %}
-  <script type='text/javascript'>
-    jQuery(function ($) {
-      $("[rel=tooltip]").tooltip();
-      $(".event").click(function() {
-        $("#message-" + this.id).slideToggle(200);
-        return false;
-      });
-    });
-  </script>
-{% endblock script %}
