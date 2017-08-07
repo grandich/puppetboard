@@ -57,11 +57,11 @@ h1.ui.header.no-margin-bottom {
 }
 
 .ui.header.unreported {
-  color: #3D96AE;
+  color: #5C6166;
 }
 
 .ui.label.unreported {
-  background-color: #3D96AE;
+  background-color: #5C6166;
 }
 
 .ui.header.noop {
