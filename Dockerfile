@@ -12,4 +12,4 @@ RUN pip install -r requirements-docker.txt
 
 COPY . /usr/src/app
 
-CMD gunicorn -b 0.0.0.0:${PUPPETBOARD_PORT} --access-logfile=/dev/stdout puppetboard.app:app --timeout 240
+CMD gunicorn -b 0.0.0.0:${PUPPETBOARD_PORT} --access-logfile=/dev/stdout puppetboard.app:app --timeout 240 --workers 8 --threads 8
