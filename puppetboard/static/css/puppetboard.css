@@ -49,11 +49,11 @@ h1.ui.header.no-margin-bottom {
 }
 
 .ui.header.changed, .ui.line.changed {
-  color: #A1CF64;
+  color: #659A1F;
 }
 
 .ui.label.changed, .ui.label.events.success {
-  background-color: #A1CF64;
+  background-color: #659A1F;
 }
 
 .ui.header.unreported {
