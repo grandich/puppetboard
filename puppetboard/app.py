@@ -327,8 +327,12 @@ def inventory_ajax(env):
 
     fact_data = {}
     for fact in facts:
+        skip = False
         for i in hide_facts:
-            if fact.name.startswith(i): continue
+            if fact.name.startswith(i):
+               skip = True
+               break
+        if skip: continue
         if fact.node not in fact_data:
             fact_data[fact.node] = {}
         fact_data[fact.node][fact.name] = fact.value
@@ -584,8 +588,12 @@ def facts(env):
     next_break = break_size
     count = 0
     for fact in facts:
+        skip = False
         for i in hide_facts:
-            if fact.startswith(i): continue
+            if fact.startswith(i):
+               skip = True
+               break
+        if skip: continue
         count += 1
 
         if letter != fact[0].upper() or not letter:
@@ -716,8 +724,12 @@ def fact_ajax(env, node, fact, value):
         'data': []}
 
     for fact_h in facts:
+        skip = False
         for i in hide_facts:
-            if fact_h.name.startswith(i): continue
+            if fact_h.name.startswith(i):
+               skip = True
+               break
+        if skip: continue
         line = []
         if not fact:
             line.append(fact_h.name)
