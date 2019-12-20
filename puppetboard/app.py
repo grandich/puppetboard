@@ -52,6 +52,7 @@ CATALOGS_COLUMNS = [
 
 app = get_app()
 graph_facts = app.config['GRAPH_FACTS']
+hide_facts = app.config['HIDE_FACTS_PREFIXES']
 numeric_level = getattr(logging, app.config['LOGLEVEL'].upper(), None)
 
 logging.basicConfig(level=numeric_level)
@@ -326,6 +327,8 @@ def inventory_ajax(env):
 
     fact_data = {}
     for fact in facts:
+        for i in hide_facts:
+            if fact.name.startswith(i): continue
         if fact.node not in fact_data:
             fact_data[fact.node] = {}
         fact_data[fact.node][fact.name] = fact.value
@@ -581,6 +584,8 @@ def facts(env):
     next_break = break_size
     count = 0
     for fact in facts:
+        for i in hide_facts:
+            if fact.startswith(i): continue
         count += 1
 
         if letter != fact[0].upper() or not letter:
@@ -711,6 +716,8 @@ def fact_ajax(env, node, fact, value):
         'data': []}
 
     for fact_h in facts:
+        for i in hide_facts:
+            if fact_h.name.startswith(i): continue
         line = []
         if not fact:
             line.append(fact_h.name)
