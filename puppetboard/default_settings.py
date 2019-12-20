@@ -61,7 +61,7 @@ HIDE_FACTS_PREFIXES = [ 'cassandra_jmx',
             'mtu_q',
             'mtu_tap',
             'mtu_veth',
-            'mtu_vnet'
+            'mtu_vnet',
             'netmask_br',
             'netmask6_',
             'network_br',
