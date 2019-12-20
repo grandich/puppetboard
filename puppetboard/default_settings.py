@@ -45,7 +45,29 @@ INVENTORY_FACTS = [('Hostname', 'fqdn'),
                    ('Architecture', 'hardwaremodel'),
                    ('Kernel Version', 'kernelrelease'),
                    ('Puppet Version', 'puppetversion'), ]
-HIDE_FACTS_PREFIXES = [ 'cassandra_jmx', 'jvm_jmx', 'ec2_network', 'mtu_veth', 'macaddress_veth' ]
+HIDE_FACTS_PREFIXES = [ 'cassandra_jmx',
+            'ec2_network',
+            'ipaddress_br',
+            'ipaddress6_br',
+            'ipaddress6_tap',
+            'ipaddress6_veth',
+            'jvm_jmx',
+            'macaddress_br',
+            'macaddress_q',
+            'macaddress_tap',
+            'macaddress_veth',
+            'macaddress_vnet',
+            'mtu_br',
+            'mtu_q',
+            'mtu_tap',
+            'mtu_veth',
+            'mtu_vnet'
+            'netmask_br',
+            'netmask6_',
+            'network_br',
+            'network6_br',
+            'network6_tap',
+            'network6_veth']
 REFRESH_RATE = 30
 DAILY_REPORTS_CHART_ENABLED = True
 DAILY_REPORTS_CHART_DAYS = 8
