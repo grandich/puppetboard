@@ -1,7 +1,9 @@
-import pytest
 import os
-from puppetboard import docker_settings
+
+import pytest
+
 import puppetboard.core
+from puppetboard import docker_settings
 
 try:
     import future.utils
@@ -9,7 +11,7 @@ except:
     pass
 
 try:
-    from imp import reload as reload
+    from importlib import reload as reload
 except:
     pass
 
@@ -38,6 +40,12 @@ def test_set_host_port(cleanUpEnv):
     reload(docker_settings)
     assert docker_settings.PUPPETDB_HOST == 'puppetdb2'
     assert docker_settings.PUPPETDB_PORT == 9081
+
+
+def test_set_proto(cleanUpEnv):
+    os.environ['PUPPETDB_PROTO'] = 'https'
+    reload(docker_settings)
+    assert docker_settings.PUPPETDB_PROTO == 'https'
 
 
 def test_cert_true_test(cleanUpEnv):

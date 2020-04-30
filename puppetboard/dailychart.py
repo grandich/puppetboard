@@ -1,9 +1,9 @@
 from datetime import datetime, timedelta
+
+from pypuppetdb.QueryBuilder import (AndOperator, EqualsOperator,
+                                     ExtractOperator, FunctionOperator,
+                                     GreaterEqualOperator, LessOperator)
 from pypuppetdb.utils import UTC
-from pypuppetdb.QueryBuilder import (
-    ExtractOperator, FunctionOperator, AndOperator,
-    GreaterEqualOperator, LessOperator, EqualsOperator,
-)
 
 DATE_FORMAT = "%Y-%m-%d"
 DATETIME_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
@@ -30,8 +30,8 @@ def _build_query(env, start, end, certname=None):
     query.add_field(FunctionOperator('count'))
     query.add_field('status')
     subquery = AndOperator()
-    subquery.add(GreaterEqualOperator('start_time', start))
-    subquery.add(LessOperator('start_time', end))
+    subquery.add(GreaterEqualOperator('producer_timestamp', start))
+    subquery.add(LessOperator('producer_timestamp', end))
     if certname is not None:
         subquery.add(EqualsOperator('certname', certname))
     if env != '*':
